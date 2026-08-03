@@ -1,0 +1,17 @@
+{
+  "name": "@vaanieal/observer",
+  "version": "0.1.0",
+  "description": "Framework-independent voice-call observability SDK",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": "./src/index.js",
+  "files": ["src", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/index.js && node --check src/session.js"
+  },
+  "keywords": ["voice", "observability", "telemetry", "audio"],
+  "license": "MIT",
+  "publishConfig": { "access": "public" }
+}
