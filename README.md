@@ -1,11 +1,11 @@
-# Vaani Observer
+# Vaani Observer — Node.js SDK
 
-## Local backend and console
+## Local dashboard and console
 
-The repository now includes a deliberately small Python backend and browser console in [`backend/`](backend/). It has no authentication, uses SQLite plus local files, and implements the SDK's create → upload → complete flow for local development.
+A deliberately small Python dashboard service lives in its own repository, [`vaanieval-observer-backend`](https://github.com/shubhamofbce/vaanieval-observer-backend), checked out alongside this one as `dashboard/`. It has no authentication, uses SQLite plus local files, and implements the SDK's create → upload → complete flow for local development.
 
 ```bash
-cd backend
+cd ../dashboard
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/uvicorn app.main:app --reload --port 8000
@@ -42,9 +42,9 @@ Repeated milestones of the same name accumulate (`count`, `occurred_at_ms` of th
 ```bash
 npm test                                            # Node SDK (node:test, no dependencies)
 
-cd backend
+cd ../dashboard
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/python -m pytest                          # FastAPI backend (pytest + TestClient)
+.venv/bin/python -m pytest                          # FastAPI dashboard (pytest + TestClient)
 ```
 
-Backend tests run against a temporary data directory and SQLite file per test, so they never touch `backend/data`.
+Dashboard tests run against a temporary data directory and SQLite file per test, so they never touch `dashboard/data`.

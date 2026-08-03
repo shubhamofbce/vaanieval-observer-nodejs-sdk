@@ -1,8 +1,4 @@
 node_modules/
 .vaani-spool/
-.pytest_cache/
 .DS_Store
 *.log
-
-# Backend lives in its own repository (vaanieval-observer-backend)
-backend/
