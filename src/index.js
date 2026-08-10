@@ -15,7 +15,10 @@ export class VaaniObserver {
       endpoint: options.endpoint,
       apiKey: options.apiKey,
       spoolDirectory: options.spoolDirectory ?? join(process.cwd(), '.vaani-spool'),
-      capture: { audio: true, httpBodies: false, websocketTextFrames: false, payloadMaxBytes: 16 * 1024, ...options.capture },
+      // Provider transcript content is application-defined and can include
+      // sensitive speech. The SDK exposes the policy flag but integrations
+      // must explicitly attach STT results to their per-turn operation.
+      capture: { audio: true, httpBodies: false, websocketTextFrames: false, sttContent: false, payloadMaxBytes: 16 * 1024, ...options.capture },
       instrumentations: { fetch: true, websocket: true, ...options.instrumentations },
       endpoints: options.endpoints ?? [],
       upload: { retries: 3, ...options.upload },
@@ -71,7 +74,7 @@ export class VaaniObserver {
     if (!create.ok) throw new Error(`Session creation failed: HTTP ${create.status}`);
     const { upload_urls: uploadUrls = {} } = await create.json();
     const objects = {};
-    for (const file of ['events.jsonl', 'caller.audio', 'agent.audio']) {
+    for (const file of ['events.jsonl', 'call.audio']) {
       const path = join(finalized.directory, file);
       let bytes; try { bytes = await readFile(path); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
       if (!uploadUrls[file]) throw new Error(`Backend did not provide an upload URL for ${file}.`);
@@ -152,7 +155,121 @@ async function captureResponseBody(response, limit) {
 function boundedText(value, limit) {
   const bytes = Buffer.from(value);
   if (bytes.byteLength <= limit) return value;
+  const structured = boundedChatBody(value, limit);
+  if (structured) return structured;
   return { _truncated: true, _original_bytes: bytes.byteLength, _preview: bytes.subarray(0, limit).toString('utf8') };
+}
+
+/**
+ * Bounds a chat-completions body by dropping whole messages, not bytes.
+ *
+ * A byte prefix keeps the system prompt — which is identical on every call —
+ * and discards the conversation, which is the only part that differs. On a real
+ * agent the instructions alone can exceed the limit, so the stored preview ends
+ * mid-sentence inside message zero, no message survives intact, and the capture
+ * answers none of the questions it was taken to answer.
+ *
+ * Keeping the newest messages instead preserves the exchange that actually
+ * produced this reply, records how many older ones were elided, and leaves the
+ * preview as valid JSON so it can still be parsed and read.
+ *
+ * Returns null when the body is not a chat request, so the caller falls back to
+ * the byte prefix.
+ */
+function boundedChatBody(text, limit) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.messages) || !parsed.messages.length) return null;
+
+  const messages = parsed.messages;
+  const envelope = { ...parsed, messages: [] };
+  // Room for the elision marker and the separators between kept messages.
+  let budget = limit - jsonBytes(envelope) - 96;
+  // Tool schemas are boilerplate that repeats on every call of the session,
+  // and a large one can crowd out the conversation entirely. The exchange is
+  // worth more than the schemas, so trade them away rather than the messages.
+  if (budget <= 256 && Array.isArray(parsed.tools) && parsed.tools.length) {
+    envelope.tools = `[${parsed.tools.length} tool schema(s) omitted to keep the conversation]`;
+    budget = limit - jsonBytes(envelope) - 96;
+  }
+  if (budget <= 0) return null;
+
+  const kept = [];
+  let elided = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const cost = jsonBytes(messages[index]) + 1;
+    if (cost <= budget) {
+      kept.unshift(messages[index]);
+      budget -= cost;
+      continue;
+    }
+    // The standing instructions are worth a summary even when they do not fit.
+    if (index === 0 && kept.length && budget > 256 && isMessageObject(messages[0])) {
+      kept.unshift(shortenMessage(messages[0], budget));
+      budget = 0;
+      continue;
+    }
+    elided = index + 1;
+    break;
+  }
+  // A large `tools` block can consume the budget before a single message fits.
+  // Falling back to a byte prefix there would lose the newest exchange for the
+  // calls that need it most, so keep a shortened version of it instead.
+  if (!kept.length && budget > 256 && isMessageObject(messages[messages.length - 1])) {
+    kept.push(shortenMessage(messages[messages.length - 1], budget));
+    elided = messages.length - 1;
+  }
+  if (!kept.length) return null;
+
+  const preview = { ...envelope, messages: kept };
+  if (elided) preview._elided_messages = elided;
+  return {
+    _truncated: true,
+    _original_bytes: Buffer.byteLength(text),
+    _preview: JSON.stringify(preview),
+    _elided_messages: elided,
+  };
+}
+
+/** Spreading a non-object message would turn a string into one key per
+ *  character, so only real message objects can be shortened. */
+function isMessageObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** The longest whole-codepoint prefix of `buffer`. Emitting a replacement
+ *  character instead would both corrupt the text and make it grow. */
+function decodeWholeCodepoints(buffer) {
+  for (let end = buffer.length; end >= 0 && end > buffer.length - 4; end -= 1) {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, end)); } catch { /* split codepoint */ }
+  }
+  return '';
+}
+
+function shortenMessage(message, budget) {
+  const content = typeof message.content === 'string' ? message.content : JSON.stringify(message.content == null ? '' : message.content);
+  const raw = Buffer.from(content);
+  const build = (room) => ({
+    ...message,
+    content: decodeWholeCodepoints(raw.subarray(0, room)),
+    _content_truncated: true,
+    _content_bytes: raw.byteLength,
+  });
+  // JSON escaping can turn one content byte into six, so the room a budget
+  // allows cannot be derived by subtraction. Shrink until the serialized
+  // message actually fits, which is the only measure that matters.
+  let low = 0;
+  let high = raw.byteLength;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (jsonBytes(build(mid)) <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return build(low);
+}
+
+function jsonBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value));
 }
 
 function validateEndpointRules(rules) {

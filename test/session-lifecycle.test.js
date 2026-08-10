@@ -63,8 +63,7 @@ test('reports instrumentation state through capture_status', async () => {
     { ...first.manifest.capture_status },
     {
       events_complete: true,
-      caller_audio_complete: true,
-      agent_audio_complete: true,
+      audio_complete: true,
       http_instrumentation: 'disabled',
       websocket_instrumentation: 'active',
       dropped_event_count: 0,
@@ -79,7 +78,7 @@ test('publishes the manifest atomically and leaves no temporary file behind', as
   session.recordInboundAudio(Buffer.from([1]), PCM);
   const { directory } = await session.end();
   const files = (await readdir(directory)).sort();
-  assert.deepEqual(files, ['caller.audio', 'events.jsonl', 'manifest.json']);
+  assert.deepEqual(files, ['call.audio', 'events.jsonl', 'manifest.json']);
 });
 
 test('is idempotent: a second end() resolves to the first finalized package', async () => {
@@ -135,19 +134,19 @@ test('degrades capture_status instead of throwing when a write fails in default 
   const session = vaani.startSession();
   await session.ready;
   // Make the audio track path unwritable so the queued append fails.
-  await mkdir(join(session.directory, 'caller.audio'));
+  await mkdir(join(session.directory, '.caller.audio.tmp'));
   session.recordInboundAudio(Buffer.from([1]), PCM);
   const { directory } = await session.end();
   const manifest = await readManifest(directory);
-  assert.equal(manifest.capture_status.events_complete, false);
-  assert.ok(manifest.capture_status.dropped_event_count >= 1);
+  assert.equal(manifest.capture_status.audio_complete, false);
+  assert.ok(manifest.capture_status.dropped_audio_chunk_count >= 1);
 });
 
 test('propagates write failures from end() in strict mode', async () => {
   const vaani = await newObserver({ strict: true });
   const session = vaani.startSession();
   await session.ready;
-  await mkdir(join(session.directory, 'caller.audio'));
+  await mkdir(join(session.directory, '.caller.audio.tmp'));
   session.recordInboundAudio(Buffer.from([1]), PCM);
   await assert.rejects(session.end(), (error) => error instanceof Error);
   await assert.rejects(session.finished);

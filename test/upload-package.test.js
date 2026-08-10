@@ -8,20 +8,19 @@ import { newObserver, tempDir, stubFetch, jsonResponse, PCM } from './helpers.js
 
 const UPLOAD_URLS = {
   'events.jsonl': 'https://objects.example.com/events',
-  'caller.audio': 'https://objects.example.com/caller',
-  'agent.audio': 'https://objects.example.com/agent',
+  'call.audio': 'https://objects.example.com/call',
 };
 
 function uploader(options = {}) {
   return new VaaniObserver({ endpoint: 'https://ingest.example.com', apiKey: 'test-key', instrumentations: { fetch: false }, ...options });
 }
 
-/** Produces a finalized package containing events.jsonl plus both audio tracks. */
+/** Produces a finalized package containing events.jsonl plus one stereo recording. */
 async function fullPackage(sessionId = 'call-1') {
   const vaani = await newObserver();
   const session = vaani.startSession({ sessionId, agentId: 'support' });
-  session.recordInboundAudio(Buffer.from([1, 2]), PCM);
-  session.recordOutboundAudio(Buffer.from([3]), PCM);
+  session.recordInboundAudio(Buffer.from([1, 0]), { ...PCM, timestampMs: 0 });
+  session.recordOutboundAudio(Buffer.from([3, 0]), { ...PCM, timestampMs: 0 });
   session.startOperation({ type: 'llm' }).end();
   return session.end({ outcome: 'completed' });
 }
@@ -57,8 +56,7 @@ test('performs create, per-object upload and complete in order', async (t) => {
   assert.deepEqual(fetcher.calls.map((call) => `${call.method} ${call.url}`), [
     'POST https://ingest.example.com/v1/sessions',
     'PUT https://objects.example.com/events',
-    'PUT https://objects.example.com/caller',
-    'PUT https://objects.example.com/agent',
+    'PUT https://objects.example.com/call',
     'POST https://ingest.example.com/v1/sessions/call-1/complete',
   ]);
 });
@@ -69,7 +67,7 @@ test('sends the manifest, auth and idempotency headers on the control calls', as
   t.after(fetcher.restore);
 
   await uploader().uploadPackage(finalized);
-  const [create, , , , complete] = fetcher.calls;
+  const [create, , , complete] = fetcher.calls;
   assert.deepEqual(JSON.parse(create.body), finalized.manifest);
   for (const call of [create, complete]) {
     assert.equal(call.headers['content-type'], 'application/json');
@@ -86,14 +84,13 @@ test('reports the byte size and sha256 of every uploaded object', async (t) => {
 
   await uploader().uploadPackage(finalized);
   const { objects } = JSON.parse(fetcher.calls.at(-1).body);
-  assert.deepEqual(Object.keys(objects), ['events.jsonl', 'caller.audio', 'agent.audio']);
+  assert.deepEqual(Object.keys(objects), ['events.jsonl', 'call.audio']);
   for (const [name, info] of Object.entries(objects)) {
     const bytes = await readFile(join(finalized.directory, name));
     assert.equal(info.byte_size, bytes.byteLength);
     assert.equal(info.sha256, sha256(bytes));
   }
-  assert.equal(objects['caller.audio'].byte_size, 2);
-  assert.equal(objects['agent.audio'].byte_size, 1);
+  assert.ok(objects['call.audio'].byte_size >= 4);
 });
 
 test('uploads the exact file bytes', async (t) => {
@@ -102,8 +99,8 @@ test('uploads the exact file bytes', async (t) => {
   t.after(fetcher.restore);
 
   await uploader().uploadPackage(finalized);
-  const caller = fetcher.calls.find((call) => call.url.endsWith('/caller'));
-  assert.deepEqual([...caller.body], [1, 2]);
+  const call = fetcher.calls.find((item) => item.url.endsWith('/call'));
+  assert.deepEqual([...call.body.subarray(0, 4)], [3, 0, 1, 0]);
 });
 
 test('normalizes a trailing slash on the configured endpoint', async (t) => {
@@ -162,7 +159,7 @@ test('fails when the backend omits an upload url for a file that exists', async 
   });
   t.after(fetcher.restore);
 
-  await assert.rejects(uploader().uploadPackage(finalized), /did not provide an upload URL for caller.audio/);
+  await assert.rejects(uploader().uploadPackage(finalized), /did not provide an upload URL for call.audio/);
 });
 
 test('fails when the create response carries no upload_urls at all', async (t) => {

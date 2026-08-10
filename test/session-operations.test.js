@@ -99,6 +99,25 @@ test('keeps only the latest value when a milestone name repeats', async () => {
   assert.equal(event.milestones.chunk.index, 2);
 });
 
+test('records bounded operation samples independently from milestones', async () => {
+  const vaani = await newObserver({ capture: { payloadMaxBytes: 64 } });
+  const session = vaani.startSession();
+  const operation = session.startOperation({ type: 'stt' });
+  operation.sample('partial', { occurred_at_ms: 10, transcript: 'hello' }, { limit: 2 });
+  operation.sample('partial', { occurred_at_ms: 20, transcript: 'hello there' }, { limit: 2 });
+  operation.sample('partial', { occurred_at_ms: 30, transcript: 'ignored' }, { limit: 2 });
+  operation.end();
+  const { directory } = await session.end();
+  const [event] = operations(await readEvents(directory));
+  assert.deepEqual(event.samples.partial, {
+    items: [
+      { occurred_at_ms: 10, transcript: 'hello' },
+      { occurred_at_ms: 20, transcript: 'hello there' },
+    ],
+    truncated: true,
+  });
+});
+
 test('ignores milestones recorded after the operation ended', async () => {
   const vaani = await newObserver();
   const session = vaani.startSession();

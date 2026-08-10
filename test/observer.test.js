@@ -10,16 +10,17 @@ async function observer() {
 }
 async function packageFor(session) { const result = await session.end({ outcome: 'completed' }); return result; }
 
-test('finalizes a portable manifest and independent audio tracks', async () => {
+test('finalizes a portable manifest and stereo call recording', async () => {
   const vaani = await observer();
   const session = vaani.startSession({ sessionId: 'call-1', agentId: 'agent-a', metadata: { env: 'test' } });
   session.recordInboundAudio(Buffer.from([1, 2]), { encoding: 'pcm_s16le', sampleRateHz: 16000, channels: 1, timestampMs: 0 });
-  session.recordOutboundAudio(Buffer.from([3]), { encoding: 'pcm_s16le', sampleRateHz: 24000, channels: 1, timestampMs: 5 });
+  session.recordOutboundAudio(Buffer.from([3, 0]), { encoding: 'pcm_s16le', sampleRateHz: 24000, channels: 1, timestampMs: 5 });
   const result = await packageFor(session);
   const manifest = JSON.parse(await readFile(join(result.directory, 'manifest.json')));
   assert.equal(manifest.session_id, 'call-1');
-  assert.equal(manifest.audio.caller.sample_rate_hz, 16000);
-  assert.deepEqual([...await readFile(join(result.directory, 'agent.audio'))], [3]);
+  assert.equal(manifest.audio.call.sample_rate_hz, 24000);
+  assert.deepEqual(manifest.audio.call.channel_layout, { left: 'agent', right: 'caller' });
+  assert.ok((await readFile(join(result.directory, 'call.audio'))).byteLength > 0);
 });
 
 test('writes append-only operation events with a turn correlation id', async () => {

@@ -88,6 +88,136 @@ test('captures bounded request and response bodies when explicitly enabled', asy
   assert.deepEqual(event.response.body, { _truncated: true, _original_bytes: 28, _preview: 'response bod' });
 });
 
+test('keeps the recent conversation when a chat body exceeds the byte budget', async (t) => {
+  // A byte prefix of this body would stop inside the system prompt and carry no
+  // conversation at all, which is exactly the capture a reviewer cannot use.
+  const messages = [
+    { role: 'system', content: 'x'.repeat(4000) },
+    { role: 'user', content: 'first question' },
+    { role: 'assistant', content: 'first answer' },
+    { role: 'user', content: 'what did I just ask?' },
+  ];
+  const body = JSON.stringify({ model: 'gpt-4o-mini', messages, stream: true });
+  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 1024 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const [event] = operations(await readEvents(directory));
+
+  assert.equal(event.request.body._truncated, true);
+  assert.equal(event.request.body._original_bytes, Buffer.byteLength(body));
+  const preview = JSON.parse(event.request.body._preview);
+  assert.equal(preview.model, 'gpt-4o-mini');
+  assert.equal(preview.messages.at(-1).content, 'what did I just ask?');
+  assert.equal(preview.messages.some((message) => message.content === 'first question'), true);
+  assert.ok(Buffer.byteLength(event.request.body._preview) <= 1024);
+});
+
+test('elides the oldest messages when even the recent ones overflow', async (t) => {
+  const messages = Array.from({ length: 40 }, (_, index) => ({ role: 'user', content: `turn ${index} `.repeat(20) }));
+  const body = JSON.stringify({ model: 'gpt-4o-mini', messages });
+  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 1024 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const [event] = operations(await readEvents(directory));
+
+  assert.ok(event.request.body._elided_messages > 0);
+  const preview = JSON.parse(event.request.body._preview);
+  assert.equal(preview._elided_messages, event.request.body._elided_messages);
+  assert.equal(preview.messages.at(-1).content, messages.at(-1).content);
+  assert.equal(preview.messages.length + preview._elided_messages, messages.length);
+});
+
+test('trades away tool schemas rather than the conversation', async (t) => {
+  // Tool schemas repeat on every call; the exchange never does. A budget that
+  // the schemas fill first would leave the reviewer with no conversation.
+  const tools = Array.from({ length: 6 }, (_, index) => ({
+    type: 'function',
+    function: { name: `tool_${index}`, description: 'd'.repeat(400), parameters: { type: 'object' } },
+  }));
+  const messages = [
+    { role: 'system', content: 's'.repeat(500) },
+    { role: 'user', content: 'the question that matters' },
+  ];
+  const body = JSON.stringify({ model: 'gpt-4o-mini', messages, tools });
+  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 1024 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const captured = operations(await readEvents(directory))[0].request.body;
+
+  const preview = JSON.parse(captured._preview);
+  assert.match(preview.tools, /tool schema\(s\) omitted/);
+  assert.equal(preview.messages.at(-1).content, 'the question that matters');
+  assert.ok(Buffer.byteLength(captured._preview) <= 1024);
+});
+
+test('keeps the preview within the budget when content needs heavy JSON escaping', async (t) => {
+  // Escaping turns one byte into two or six, so a budget computed against raw
+  // bytes overflows. Only the serialized size is a real measure.
+  const messages = [
+    { role: 'system', content: '"'.repeat(4000) },
+    { role: 'user', content: 'hi' },
+  ];
+  const body = JSON.stringify({ model: 'm', messages });
+  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 2000 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const captured = operations(await readEvents(directory))[0].request.body;
+
+  assert.ok(Buffer.byteLength(captured._preview) <= 2000, `preview was ${Buffer.byteLength(captured._preview)} bytes`);
+  const preview = JSON.parse(captured._preview);
+  assert.equal(preview.messages[0]._content_truncated, true);
+  assert.equal(preview.messages.at(-1).content, 'hi');
+});
+
+test('elides a message that is not an object rather than spreading it', async (t) => {
+  // Spreading a string would emit one key per character and blow the budget by
+  // orders of magnitude.
+  const body = JSON.stringify({ model: 'm', messages: ['x'.repeat(2000), { role: 'user', content: 'hi' }] });
+  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 500 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const captured = operations(await readEvents(directory))[0].request.body;
+
+  assert.ok(Buffer.byteLength(captured._preview) <= 500);
+  const preview = JSON.parse(captured._preview);
+  assert.deepEqual(preview.messages, [{ role: 'user', content: 'hi' }]);
+  assert.equal(preview._elided_messages, 1);
+});
+
+test('never splits a multi-byte character when shortening', async (t) => {
+  const body = JSON.stringify({ model: 'm', messages: [{ role: 'system', content: '中'.repeat(1000) }, { role: 'user', content: 'hi' }] });
+  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 2000 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const captured = operations(await readEvents(directory))[0].request.body;
+
+  const preview = JSON.parse(captured._preview);
+  assert.equal(preview.messages[0].content.includes('\uFFFD'), false);
+  assert.equal(/^中*$/.test(preview.messages[0].content), true);
+  assert.ok(Buffer.byteLength(captured._preview) <= 2000);
+});
+
+test('falls back to a byte prefix for a body that is not a chat request', async (t) => {  const { vaani } = await instrumented(t, { options: { capture: { httpBodies: true, payloadMaxBytes: 12 } } });
+  const session = vaani.startSession();
+  await session.run(() => fetch('https://api.example.com/v1/chat', { method: 'POST', body: JSON.stringify({ audio: 'x'.repeat(50) }) }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const { directory } = await session.end();
+  const [event] = operations(await readEvents(directory));
+  assert.equal(event.request.body._preview, '{"audio":"xx');
+});
+
 test('marks a non-2xx response as an error while still returning it', async (t) => {
   const { vaani } = await instrumented(t, { responder: () => new Response('bad', { status: 503 }) });
   const session = vaani.startSession();

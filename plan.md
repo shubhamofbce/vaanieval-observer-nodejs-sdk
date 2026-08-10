@@ -85,10 +85,13 @@ Each event should contain:
 
 Audio chunks also need their session-relative timestamp. This is what makes audio and provider calls line up accurately in the console.
 
-### 3.3 Record two independent audio tracks
+### 3.3 Capture both sources and finalize one stereo recording
 
 - Capture caller audio where it enters the application, before it is sent to STT.
 - Capture agent audio after interruption/cancellation handling and immediately before it is sent for playback, so the recording represents what was actually intended to be played.
+- Spool both sources independently during the call, then finalize one
+  timeline-aligned `call.audio` file with agent on the left and caller on the
+  right. This keeps the media path non-blocking while producing one upload.
 - Preserve each track's encoding, sample rate, channel count, and timestamps.
 - Do not mix the tracks in the live call process. A backend worker may produce a stereo or mixed preview later.
 
@@ -120,8 +123,7 @@ During the call, write audio and events to a per-session local spool directory. 
 <spool>/session-id/
   manifest.json
   events.jsonl
-  caller.audio
-  agent.audio
+  call.audio
 ```
 
 An upload worker sends this package after the call. It retries transient failures and removes local files only after the backend acknowledges successful ingestion.
@@ -331,25 +333,22 @@ Define the contract independently of TypeScript so the future Python SDK can emi
   "outcome": "completed",
   "capture_status": {
     "events_complete": true,
-    "caller_audio_complete": true,
-    "agent_audio_complete": true,
+    "audio_complete": true,
     "http_instrumentation": "active",
     "websocket_instrumentation": "active",
     "dropped_event_count": 0,
     "dropped_audio_chunk_count": 0
   },
   "audio": {
-    "caller": {
-      "file": "caller.audio",
-      "encoding": "pcm_s16le",
-      "sample_rate_hz": 16000,
-      "channels": 1
-    },
-    "agent": {
-      "file": "agent.audio",
+    "call": {
+      "file": "call.audio",
       "encoding": "pcm_s16le",
       "sample_rate_hz": 24000,
-      "channels": 1
+      "channels": 2,
+      "channel_layout": {
+        "left": "agent",
+        "right": "caller"
+      }
     }
   }
 }
@@ -412,10 +411,15 @@ For the simplest reliable implementation:
 - Write the audio format already available to the application when possible.
 - If the application supplies raw PCM, append it to a raw file during the call.
 - Store timing discontinuities in the event/manifest data rather than writing silence during the call.
-- After upload, use a Python worker with FFmpeg to produce a normalized preview.
-- Produce a stereo preview with caller on the left and agent on the right, or expose separate tracks in the player.
+- Finalize a stereo PCM recording locally after capture, using the highest
+  source sample rate and inserting silence for timeline gaps.
+- The dashboard wraps that single recording as WAV and can expose either
+  channel virtually for STT review without storing duplicate media.
 
-Raw mono 16 kHz, 16-bit PCM uses about 115 MB per hour per track. Two raw tracks can therefore use roughly 230 MB per call-hour before compression. This is acceptable for a small MVP with short calls and prompt post-call compression, but it requires spool quotas and cleanup.
+Raw stereo 24 kHz, 16-bit PCM uses about 346 MB per call-hour. This preserves
+voice quality and channel separation, but long calls require larger upload
+limits, spool quotas, cleanup, and eventually lossless or high-bitrate
+compression.
 
 Do not run CPU-heavy transcoding on the Node.js call thread. If encoding is required locally, perform it in a worker thread or separate process.
 

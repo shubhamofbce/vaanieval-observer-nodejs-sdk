@@ -12,7 +12,7 @@ test('applies documented defaults when constructed with no options', () => {
   assert.equal(vaani.options.endpoint, undefined);
   assert.equal(vaani.options.apiKey, undefined);
   assert.equal(vaani.options.spoolDirectory, join(process.cwd(), '.vaani-spool'));
-  assert.deepEqual(vaani.options.capture, { audio: true, httpBodies: false, websocketTextFrames: false, payloadMaxBytes: 16 * 1024 });
+  assert.deepEqual(vaani.options.capture, { audio: true, httpBodies: false, websocketTextFrames: false, sttContent: false, payloadMaxBytes: 16 * 1024 });
   assert.deepEqual(vaani.options.endpoints, []);
   assert.deepEqual(vaani.options.upload, { retries: 3 });
   assert.equal(vaani.options.strict, false);
@@ -21,7 +21,7 @@ test('applies documented defaults when constructed with no options', () => {
 
 test('merges partial capture and instrumentation options instead of replacing them', () => {
   const vaani = observer({ capture: { audio: false }, instrumentations: { fetch: false, websocket: false } });
-  assert.deepEqual(vaani.options.capture, { audio: false, httpBodies: false, websocketTextFrames: false, payloadMaxBytes: 16 * 1024 });
+  assert.deepEqual(vaani.options.capture, { audio: false, httpBodies: false, websocketTextFrames: false, sttContent: false, payloadMaxBytes: 16 * 1024 });
   assert.deepEqual(vaani.options.instrumentations, { fetch: false, websocket: false });
 });
 
