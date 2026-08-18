@@ -1,3 +1,23 @@
+/**
+ * Upload transport tests.
+ *
+ * Three tests here prove a specific past bug and fail against the pre-fix
+ * source (`git show HEAD~1:src/index.js`):
+ *
+ *   retries a failed object upload rather than discarding the recording
+ *   a malformed retry count still attempts the upload
+ *   bounds a peer that accepts the connection and then never responds
+ *     (pre-fix this HANGS FOREVER rather than failing, since there was no
+ *     timeout at all -- that hang is the proof; do not run the file against
+ *     pre-fix source without excluding it)
+ *
+ * `does not retry a rejection that says the request itself is wrong` passes
+ * either way -- pre-fix nothing was retried, so "does not retry" held
+ * trivially. It is a forward guard on RETRYABLE_STATUS, not a proof. The
+ * `retries: 0` in `fails and stops when an object upload is rejected` is
+ * likewise accommodation for the new behaviour, not a new assertion. Recorded
+ * because a test that cannot fail is not a verification.
+ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile } from 'node:fs/promises';
@@ -271,4 +291,20 @@ test('propagates unexpected filesystem errors instead of skipping the object', a
 test('sha256 produces the canonical digest of the given bytes', () => {
   assert.equal(sha256(Buffer.from('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   assert.equal(sha256(Buffer.alloc(0)), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+});
+
+test('a malformed retry count still attempts the upload', async (t) => {
+  // `retries: Number(process.env.VAANI_UPLOAD_RETRIES)` with the variable
+  // unset is NaN, which made the loop body never run: zero requests, and a
+  // thrown `undefined` that a caller cannot even log.
+  for (const retries of [-1, NaN, 'three', null]) {
+    const finalized = await fullPackage(`call-${String(retries)}`);
+    const fetcher = stubFetch((call, index) => (index === 1
+      ? jsonResponse({ upload_urls: UPLOAD_URLS }, 201)
+      : jsonResponse({ status: 'ready' })));
+    t.after(fetcher.restore);
+
+    await uploader({ upload: { retries } }).uploadPackage(finalized);
+    assert.ok(fetcher.calls.length > 0, `no request was made for retries=${String(retries)}`);
+  }
 });

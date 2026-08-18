@@ -109,24 +109,28 @@ export class VaaniObserver {
    */
   async #send(url, init, bodyBytes = 0) {
     const { retries = 3, timeoutMs = 30_000, minThroughputBps = 128 * 1024 } = this.options.upload ?? {};
+    // A negative or non-numeric `retries` must not skip the loop entirely:
+    // that would throw `undefined` without making a single request, losing the
+    // recording *and* the caller's ability to report why.
+    const attempts = Number.isFinite(Number(retries)) ? Math.max(0, Math.trunc(Number(retries))) : 3;
     // AbortSignal.timeout() rejects a fractional delay outright, and the
     // size allowance is almost never a whole millisecond.
     const budget = Math.ceil(minThroughputBps > 0 && bodyBytes > 0
       ? timeoutMs + (bodyBytes / minThroughputBps) * 1000
       : timeoutMs);
     let lastError;
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
+    for (let attempt = 0; attempt <= attempts; attempt += 1) {
       try {
         const response = await fetch(url, { ...init, signal: AbortSignal.timeout(budget) });
-        if (!(attempt < retries && RETRYABLE_STATUS.has(response.status))) return response;
+        if (!(attempt < attempts && RETRYABLE_STATUS.has(response.status))) return response;
         lastError = new Error(`HTTP ${response.status}`);
       } catch (error) {
         lastError = error;
-        if (attempt >= retries) break;
+        if (attempt >= attempts) break;
       }
       await new Promise((resolve) => { setTimeout(resolve, 2 ** attempt * 250); });
     }
-    throw lastError;
+    throw lastError ?? new Error(`Upload aborted before any request was made (retries: ${retries}).`);
   }
 
   #installFetchObserver() {
