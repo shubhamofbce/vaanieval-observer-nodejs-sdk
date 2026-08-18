@@ -4,6 +4,11 @@ import { join } from 'node:path';
 import { sha256 } from './session.js';
 import { Session } from './session.js';
 
+// 4xx other than these mean the request itself is wrong, so retrying only
+// wastes the shutdown window; a digest mismatch in particular must fail fast
+// so the package is kept for inspection rather than re-sent unchanged.
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 /** A provider-neutral, local-first observer for voice-agent calls. */
 export class VaaniObserver {
   #sessions = new Set();
@@ -70,7 +75,7 @@ export class VaaniObserver {
     if (!this.options.endpoint || !this.options.apiKey) throw new Error('endpoint and apiKey are required for uploadPackage().');
     const base = this.options.endpoint.replace(/\/$/, '');
     const headers = { authorization: `Bearer ${this.options.apiKey}`, 'content-type': 'application/json', 'idempotency-key': finalized.sessionId };
-    const create = await fetch(`${base}/v1/sessions`, { method: 'POST', headers, body: JSON.stringify(finalized.manifest) });
+    const create = await this.#send(`${base}/v1/sessions`, { method: 'POST', headers, body: JSON.stringify(finalized.manifest) });
     if (!create.ok) throw new Error(`Session creation failed: HTTP ${create.status}`);
     const { upload_urls: uploadUrls = {} } = await create.json();
     const objects = {};
@@ -78,13 +83,50 @@ export class VaaniObserver {
       const path = join(finalized.directory, file);
       let bytes; try { bytes = await readFile(path); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
       if (!uploadUrls[file]) throw new Error(`Backend did not provide an upload URL for ${file}.`);
-      const response = await fetch(uploadUrls[file], { method: 'PUT', body: bytes });
+      const response = await this.#send(uploadUrls[file], { method: 'PUT', body: bytes }, bytes.byteLength);
       if (!response.ok) throw new Error(`Upload failed for ${file}: HTTP ${response.status}`);
       objects[file] = { byte_size: bytes.byteLength, sha256: sha256(bytes) };
     }
-    const complete = await fetch(`${base}/v1/sessions/${encodeURIComponent(finalized.sessionId)}/complete`, { method: 'POST', headers, body: JSON.stringify({ objects }) });
+    const complete = await this.#send(`${base}/v1/sessions/${encodeURIComponent(finalized.sessionId)}/complete`, { method: 'POST', headers, body: JSON.stringify({ objects }) });
     if (!complete.ok) throw new Error(`Session completion failed: HTTP ${complete.status}`);
     return complete.json();
+  }
+
+  /**
+   * Send one request, retrying the failures that are worth retrying.
+   *
+   * `upload.retries` was configured from the first release and never read by
+   * anything, so a 503 or a dropped connection discarded the recording on the
+   * first attempt. Uploads are idempotent -- the session id is the idempotency
+   * key and objects are content-addressed -- so retrying is safe.
+   *
+   * The timeout scales with the body because a flat deadline makes every
+   * object above `timeout x throughput` permanently unshippable: each retry
+   * hits the identical wall, forever. Having no timeout at all -- the previous
+   * behaviour -- is worse still: a peer that accepts the connection and then
+   * stops reading hangs the caller until the process is killed, which on a
+   * shutdown hook means the call is lost.
+   */
+  async #send(url, init, bodyBytes = 0) {
+    const { retries = 3, timeoutMs = 30_000, minThroughputBps = 128 * 1024 } = this.options.upload ?? {};
+    // AbortSignal.timeout() rejects a fractional delay outright, and the
+    // size allowance is almost never a whole millisecond.
+    const budget = Math.ceil(minThroughputBps > 0 && bodyBytes > 0
+      ? timeoutMs + (bodyBytes / minThroughputBps) * 1000
+      : timeoutMs);
+    let lastError;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(budget) });
+        if (!(attempt < retries && RETRYABLE_STATUS.has(response.status))) return response;
+        lastError = new Error(`HTTP ${response.status}`);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= retries) break;
+      }
+      await new Promise((resolve) => { setTimeout(resolve, 2 ** attempt * 250); });
+    }
+    throw lastError;
   }
 
   #installFetchObserver() {

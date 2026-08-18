@@ -178,8 +178,63 @@ test('fails and stops when an object upload is rejected', async (t) => {
   });
   t.after(fetcher.restore);
 
-  await assert.rejects(uploader().uploadPackage(finalized), /Upload failed for events.jsonl: HTTP 500/);
+  await assert.rejects(
+    uploader({ upload: { retries: 0 } }).uploadPackage(finalized),
+    /Upload failed for events.jsonl: HTTP 500/,
+  );
+  // One create plus one PUT: the second object must not be attempted once the
+  // first has failed, or a half-uploaded package looks complete.
   assert.equal(fetcher.calls.length, 2);
+});
+
+test('retries a failed object upload rather than discarding the recording', async (t) => {
+  const finalized = await fullPackage();
+  let puts = 0;
+  const fetcher = stubFetch((call, index) => {
+    if (index === 1) return jsonResponse({ upload_urls: UPLOAD_URLS }, 201);
+    if (call.method !== 'PUT') return jsonResponse({ status: 'ready' });
+    puts += 1;
+    return new Response(null, { status: puts === 1 ? 503 : 204 });
+  });
+  t.after(fetcher.restore);
+
+  // `upload.retries` was configured from the first release and never read, so
+  // a single 503 threw away a call that a retry would have delivered.
+  await uploader({ upload: { retries: 3 } }).uploadPackage(finalized);
+  assert.equal(puts, 3, 'the rejected object is re-sent, then the second is sent');
+});
+
+test('does not retry a rejection that says the request itself is wrong', async (t) => {
+  const finalized = await fullPackage();
+  const fetcher = stubFetch((call, index) => {
+    if (index === 1) return jsonResponse({ upload_urls: UPLOAD_URLS }, 201);
+    return new Response(null, { status: 400 });
+  });
+  t.after(fetcher.restore);
+
+  // Re-sending identical bytes cannot fix a digest mismatch; it only burns the
+  // shutdown window that the remaining objects need.
+  await assert.rejects(uploader().uploadPackage(finalized), /Upload failed for events.jsonl: HTTP 400/);
+  assert.equal(fetcher.calls.length, 2);
+});
+
+test('bounds a peer that accepts the connection and then never responds', async (t) => {
+  const finalized = await fullPackage();
+  const fetcher = stubFetch(async (call, index) => {
+    if (index === 1) return jsonResponse({ upload_urls: UPLOAD_URLS }, 201);
+    // Never settles unless the caller aborts it.
+    return new Promise((resolve, reject) => {
+      call.init.signal?.addEventListener('abort', () => reject(call.init.signal.reason));
+    });
+  });
+  t.after(fetcher.restore);
+
+  // With no timeout at all -- the previous behaviour -- this hung until the
+  // process was killed, which on a shutdown hook means the call is lost.
+  await assert.rejects(
+    uploader({ upload: { retries: 0, timeoutMs: 120 } }).uploadPackage(finalized),
+    (error) => error.name === 'TimeoutError',
+  );
 });
 
 test('fails when completion is rejected', async (t) => {
