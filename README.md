@@ -1,8 +1,27 @@
-# Vaani Observer — Node.js SDK
+# Vaani Observer for Node.js
 
-## Local dashboard and console
+> Local-first observability for real-time voice agents.
 
-A deliberately small Python dashboard service lives in its own repository, [`vaanieval-observer-backend`](https://github.com/shubhamofbce/vaanieval-observer-backend), checked out alongside this one as `dashboard/`. It has no authentication, uses SQLite plus local files, and implements the SDK's create → upload → complete flow for local development.
+Capture the STT, LLM, TTS, tool, WebSocket, and audio activity behind a voice
+call without putting a network dependency on its live media path. Vaani
+Observer writes a portable session package locally, then uploads it explicitly
+after the call for review in the [Vaani Observer Dashboard](https://github.com/shubhamofbce/vaanieval-observer-backend).
+
+![Vaani Observer dashboard](docs/images/dashboard-overview.png)
+
+## What you get
+
+- Provider-neutral operation spans and streaming milestones for STT, LLM, TTS,
+  tools, and connection lifetimes.
+- Timeline-aligned caller and agent audio, recorded as stereo PCM.
+- Safe ambient instrumentation: only traffic inside an active session that
+  matches your configured endpoint rules is observed.
+- A byte-compatible package format shared with the
+  [Python SDK](https://github.com/shubhamofbce/vaanieval-observer-python-sdk).
+
+## Quick start
+
+A deliberately small Python dashboard service lives in its own repository, [`vaanieval-observer-backend`](https://github.com/shubhamofbce/vaanieval-observer-backend), checked out alongside this one as `dashboard/`. It uses SQLite plus local files and implements the SDK's create → upload → complete flow for local development.
 
 ```bash
 cd ../dashboard
@@ -11,15 +30,13 @@ python -m venv .venv
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
-Open [http://localhost:8000](http://localhost:8000). Configure the SDK with `endpoint: 'http://localhost:8000'` and any non-empty `apiKey` (the local service intentionally does not validate it).
+Open [http://localhost:8000](http://localhost:8000). Configure the SDK with `endpoint: 'http://localhost:8000'` and `apiKey: 'local-dev'`. The dashboard can enforce minted API keys with `VAANI_REQUIRE_API_KEY=1`.
 
 The console uses a self-contained operation timeline with no CDN dependency. Audio is stored as the SDK's original raw PCM track; the console requests an on-demand WAV wrapper for browser playback without creating a second stored copy. The wrapper is streamed and honours HTTP `Range` requests, which Safari requires before it will play any media response.
 
 This local implementation has purposeful limits: uploads pass through one Python process and are capped at 128 MiB, SQLite/local disk are single-machine storage, and there is no auth or multi-user isolation. Those keep setup simple, but production needs object storage, Postgres, async audio processing, authentication, retention controls, and a CDN-pinned/self-hosted chart asset.
 
-Local-first Node.js observability for voice-agent calls. It writes a portable session package (`manifest.json`, `events.jsonl`, `call.audio`) to disk and never blocks the call path on a remote upload. `call.audio` is timeline-aligned 16-bit stereo PCM with agent audio on the left and caller audio on the right.
-
-## Local use
+## Instrument a call
 
 ```js
 import { VaaniObserver } from '@vaanieal/observer';
